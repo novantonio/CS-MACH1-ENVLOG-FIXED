@@ -1,7 +1,7 @@
 """
 app.py
 ------
-CS-MACH1 EnvLogger Pipeline — Con download PDF
+CS-MACH1 EnvLogger Pipeline — Download PDF nella Sidebar
 """
 
 from __future__ import annotations
@@ -32,7 +32,7 @@ CORA_URL_TEMPLATE = (
 )
 
 
-# ── Parser (invariato) ────────────────────────────────────────────────────────
+# ── Parser (unchanged) ────────────────────────────────────────────────────────
 
 @dataclass
 class LoggerMetadata:
@@ -113,22 +113,7 @@ def fetch_cora_data(lat: float, lon: float) -> pd.DataFrame | None:
         return None
 
 
-# ── Plots ─────────────────────────────────────────────────────────────────────
-
-def plot_individual_logger(sdata: pd.DataFrame):
-    fig, ax = plt.subplots(figsize=(12, 6))
-    ax.plot(sdata["time"], sdata["temperature"], color="steelblue", linewidth=1.6, alpha=0.85, label="Raw Temperature")
-    rolling = sdata["temperature"].rolling(window=7, min_periods=1).mean()
-    ax.plot(sdata["time"], rolling, color="red", linewidth=2.8, label="7-day Rolling Mean")
-    
-    ax.set_xlabel("Date")
-    ax.set_ylabel("Temperature [°C]")
-    ax.set_title(f"Logger: {sdata['custom_name'].iloc[0]}")
-    ax.grid(True, alpha=0.3)
-    ax.legend()
-    fig.tight_layout()
-    return fig
-
+# ── Plots (same as before) ────────────────────────────────────────────────────
 
 def plot_interannual_variability(cora_df: pd.DataFrame | None, logger_dfs: dict, lat: float, lon: float):
     fig, ax = plt.subplots(figsize=(12, 6))
@@ -137,7 +122,6 @@ def plot_interannual_variability(cora_df: pd.DataFrame | None, logger_dfs: dict,
         cora_data = cora_df.copy()
         cora_data['day_of_year'] = cora_data['time'].dt.dayofyear
         daily_cora = cora_data.groupby('day_of_year')['TEMP'].agg(['mean', 'std']).reset_index()
-
         ax.plot(daily_cora['day_of_year'], daily_cora['mean'], color='blue', linewidth=2, label='CORA Interannual Mean')
         ax.fill_between(daily_cora['day_of_year'],
                         daily_cora['mean'] - daily_cora['std'].fillna(0),
@@ -149,10 +133,9 @@ def plot_interannual_variability(cora_df: pd.DataFrame | None, logger_dfs: dict,
         if not all_logger.empty:
             all_logger['day_of_year'] = all_logger['time'].dt.dayofyear
             daily_logger = all_logger.groupby('day_of_year')['temperature'].agg(['mean', 'max', 'min']).reset_index()
-
-            ax.plot(daily_logger['day_of_year'], daily_logger['mean'], color='red', label='Loggers Mean', marker='o', markersize=3)
-            ax.plot(daily_logger['day_of_year'], daily_logger['max'], color='darkorange', label='Loggers Max', linestyle=':', marker='^', markersize=3)
-            ax.plot(daily_logger['day_of_year'], daily_logger['min'], color='green', label='Loggers Min', linestyle='--', marker='v', markersize=3)
+            ax.plot(daily_logger['day_of_year'], daily_logger['mean'], color='red', label='All Loggers Mean', marker='o', markersize=3)
+            ax.plot(daily_logger['day_of_year'], daily_logger['max'], color='darkorange', label='All Loggers Max', linestyle=':', marker='^', markersize=3)
+            ax.plot(daily_logger['day_of_year'], daily_logger['min'], color='green', label='All Loggers Min', linestyle='--', marker='v', markersize=3)
 
     ax.set_xlabel('Day of Year')
     ax.set_ylabel('Temperature [°C]')
@@ -163,7 +146,40 @@ def plot_interannual_variability(cora_df: pd.DataFrame | None, logger_dfs: dict,
     return fig
 
 
-# ── Download PDF Helper ───────────────────────────────────────────────────────
+def plot_individual_doy(sdata: pd.DataFrame, cora_df: pd.DataFrame | None, lat: float, lon: float):
+    fig, ax = plt.subplots(figsize=(12, 6))
+
+    if cora_df is not None and not cora_df.empty:
+        cora_data = cora_df.copy()
+        cora_data['day_of_year'] = cora_data['time'].dt.dayofyear
+        daily_cora = cora_data.groupby('day_of_year')['TEMP'].agg(['mean', 'std']).reset_index()
+        ax.plot(daily_cora['day_of_year'], daily_cora['mean'], color='blue', linewidth=2, label='CORA Interannual Mean')
+        ax.fill_between(daily_cora['day_of_year'],
+                        daily_cora['mean'] - daily_cora['std'].fillna(0),
+                        daily_cora['mean'] + daily_cora['std'].fillna(0),
+                        color='lightblue', alpha=0.4, label='CORA ± Std')
+
+    if not sdata.empty:
+        logger_data = sdata.copy()
+        logger_data['day_of_year'] = logger_data['time'].dt.dayofyear
+        daily_logger = logger_data.groupby('day_of_year')['temperature'].agg(['mean', 'max', 'min']).reset_index()
+        name = sdata['custom_name'].iloc[0]
+
+        ax.plot(daily_logger['day_of_year'], daily_logger['mean'], color='red', linewidth=2.5,
+                label=f'{name} Mean', marker='o', markersize=4)
+        ax.plot(daily_logger['day_of_year'], daily_logger['max'], color='darkorange', linestyle=':',
+                label=f'{name} Max', marker='^', markersize=4)
+        ax.plot(daily_logger['day_of_year'], daily_logger['min'], color='green', linestyle='--',
+                label=f'{name} Min', marker='v', markersize=4)
+
+    ax.set_xlabel('Day of Year')
+    ax.set_ylabel('Temperature [°C]')
+    ax.set_title(f'{name} vs CORA Climatology')
+    ax.grid(True)
+    ax.legend()
+    fig.tight_layout()
+    return fig
+
 
 def download_plot_as_pdf(fig, filename="plot.pdf"):
     buf = io.BytesIO()
@@ -172,7 +188,7 @@ def download_plot_as_pdf(fig, filename="plot.pdf"):
     return buf
 
 
-# ── App ───────────────────────────────────────────────────────────────────────
+# ── Main App ──────────────────────────────────────────────────────────────────
 
 apply_cs_mach1_theme(
     page_title="CS-MACH1 fixed envlogger pipeline",
@@ -186,7 +202,11 @@ with st.sidebar:
     default_lat = st.number_input("Default Latitude", value=44.376, format="%.4f")
     default_lon = st.number_input("Default Longitude", value=9.071, format="%.4f")
 
-uploaded_files = st.file_uploader("Upload EnvLogger CSV files", type=["csv"], accept_multiple_files=True)
+    st.divider()
+    st.markdown("### 📥 Downloads")
+    download_combined = st.button("Download Combined Plot (PDF)", use_container_width=True)
+
+    uploaded_files = st.file_uploader("Upload EnvLogger CSV files", type=["csv"], accept_multiple_files=True)
 
 if st.button("🚀 Process Files", type="primary", use_container_width=True) and uploaded_files:
     logger_dfs = {}
@@ -212,22 +232,21 @@ if "logger_dfs" in st.session_state and st.session_state.logger_dfs:
 
     cora_df = fetch_cora_data(lat, lon)
 
-    # Plot Combinato + Download
+    # Plot Combinato
     st.header("📊 Interannual Variability — All Loggers vs CORA")
     fig_combined = plot_interannual_variability(cora_df, logger_dfs, lat, lon)
     st.pyplot(fig_combined)
 
-    col1, col2 = st.columns([1, 1])
-    with col1:
-        if st.button("📥 Download Combined Plot as PDF", use_container_width=True):
-            pdf_bytes = download_plot_as_pdf(fig_combined, "CS_MACH1_Combined_Plot.pdf")
-            st.download_button(
-                label="⬇️ Download PDF",
-                data=pdf_bytes,
-                file_name="CS_MACH1_Combined_Plot.pdf",
-                mime="application/pdf",
-                use_container_width=True
-            )
+    # Download Combined dal sidebar
+    if download_combined:
+        pdf_bytes = download_plot_as_pdf(fig_combined, "CS_MACH1_Combined_Plot.pdf")
+        st.sidebar.download_button(
+            label="⬇️ Download Combined Plot PDF",
+            data=pdf_bytes,
+            file_name="CS_MACH1_Combined_Plot.pdf",
+            mime="application/pdf",
+            use_container_width=True
+        )
 
     # Summary Table
     st.header("📋 Summary Table")
@@ -244,26 +263,11 @@ if "logger_dfs" in st.session_state and st.session_state.logger_dfs:
         })
     st.dataframe(pd.DataFrame(summary), use_container_width=True)
 
-    # Plots Individuali + Download
-    st.header("📈 Individual Logger Analysis")
+    # Individual Plots
+    st.header("📈 Individual Logger vs CORA")
     for fname, sdata in logger_dfs.items():
         with st.expander(f"🔍 {fname} — {sdata['custom_name'].iloc[0]}", expanded=False):
-            col1, col2, col3, col4 = st.columns(4)
-            col1.metric("Mean", f"{sdata['temperature'].mean():.2f} °C")
-            col2.metric("Max", f"{sdata['temperature'].max():.2f} °C")
-            col3.metric("Min", f"{sdata['temperature'].min():.2f} °C")
-            col4.metric("Samples", len(sdata))
-
-            fig_ind = plot_individual_logger(sdata)
+            fig_ind = plot_individual_doy(sdata, cora_df, lat, lon)
             st.pyplot(fig_ind)
-
-            if st.button(f"📥 Download PDF — {sdata['custom_name'].iloc[0]}", key=f"dl_{fname}"):
-                pdf_bytes = download_plot_as_pdf(fig_ind, f"CS_MACH1_{sdata['custom_name'].iloc[0]}.pdf")
-                st.download_button(
-                    label="⬇️ Download this plot as PDF",
-                    data=pdf_bytes,
-                    file_name=f"CS_MACH1_{sdata['custom_name'].iloc[0]}.pdf",
-                    mime="application/pdf"
-                )
 
     cs_mach1_footer("CS-MACH1 · Fixed EnvLogger Analysis Pipeline")
