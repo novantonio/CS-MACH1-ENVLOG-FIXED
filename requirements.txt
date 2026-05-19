@@ -1,6 +1,5 @@
-io
-warnings
-dataclasses
-matplotlib
-requests
 streamlit
+pandas
+matplotlib
+numpy
+requests
