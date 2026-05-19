@@ -1,11 +1,8 @@
 """
 app.py
 ------
-CS-MACH EnvLogger pipeline — Streamlit single-file app.
-
-File richiesti nella stessa cartella:
-  • cs_mach1_theme.py
-  • logo.png
+CS-MACH EnvLogger Pipeline — Simplified Version
+Only one main DOY plot as requested.
 """
 
 from __future__ import annotations
@@ -14,7 +11,6 @@ import io
 import warnings
 from dataclasses import dataclass
 
-import matplotlib.cm as cm
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
@@ -37,19 +33,8 @@ CORA_URL_TEMPLATE = (
     "%5B({lon}):1:({lon})%5D"
 )
 
-MONTH_LABELS = [
-    "Gen", "Feb", "Mar", "Apr", "Mag", "Giu",
-    "Lug", "Ago", "Set", "Ott", "Nov", "Dic"
-]
 
-TMAX = 32
-
-
-def _year_marker(year: int) -> str:
-    return {2025: "*", 2026: "^", 2027: "s"}.get(year, "o")
-
-
-# ── Data classes ──────────────────────────────────────────────────────────────
+# ── Metadata & Parser ─────────────────────────────────────────────────────────
 
 @dataclass
 class LoggerMetadata:
@@ -60,49 +45,50 @@ class LoggerMetadata:
     longitude: float
 
 
-# ── Parser ────────────────────────────────────────────────────────────────────
+def extract_metadata(df: pd.DataFrame, default_lat: float, default_lon: float) -> LoggerMetadata:
+    try:
+        # Flexible row detection
+        serial_row = 8 if "serial" in str(df.iloc[8, 0]).lower() else 9
+        name_row = serial_row + 1
+        samples_row = 13 if "samples" in str(df.iloc[13, 0]).lower() else 14
 
-def extract_metadata(
-    df: pd.DataFrame,
-    default_lat: float,
-    default_lon: float,
-) -> LoggerMetadata:
-    serial = str(df.iloc[9, 1]).strip()
-    custom_name = str(df.iloc[10, 1]).strip()
-    sampling_frequency = str(df.iloc[13, 1]).strip()
+        serial = str(df.iloc[serial_row, 1]).strip()
+        custom_name = str(df.iloc[name_row, 1]).strip()
+        sampling = str(df.iloc[samples_row, 1]).strip()
 
-    # Rilevamento posizione lat/lon
-    has_latitude = "lat" in str(df.iloc[15, 0]).lower() if len(df) > 15 else False
-    if has_latitude:
-        latitude = df.iloc[15, 1]
-        longitude = df.iloc[16, 1]
-    else:
-        latitude = df.iloc[16, 1]
-        longitude = df.iloc[17, 1]
+        # Find latitude row
+        lat_row = None
+        for i in range(14, 22):
+            cell = str(df.iloc[i, 0]).lower()
+            if "lat" in cell:
+                lat_row = i
+                break
 
-    latitude = pd.to_numeric(latitude, errors="coerce")
-    longitude = pd.to_numeric(longitude, errors="coerce")
+        if lat_row is not None:
+            lat = pd.to_numeric(df.iloc[lat_row, 1], errors="coerce")
+            lon = pd.to_numeric(df.iloc[lat_row + 1, 1], errors="coerce")
+        else:
+            lat = lon = None
 
-    if pd.isna(latitude) or pd.isna(longitude):
-        latitude, longitude = default_lat, default_lon
+        if pd.isna(lat) or pd.isna(lon):
+            lat, lon = default_lat, default_lon
 
-    return LoggerMetadata(
-        serial=serial,
-        custom_name=custom_name,
-        sampling_frequency=sampling_frequency,
-        latitude=float(latitude),
-        longitude=float(longitude),
-    )
+        return LoggerMetadata(serial, custom_name or "Unknown", sampling, float(lat), float(lon))
+    except:
+        return LoggerMetadata("Unknown", "Unknown", "Unknown", default_lat, default_lon)
 
 
-def parse_envlog_csv(
-    df: pd.DataFrame,
-    default_lat: float,
-    default_lon: float,
-) -> pd.DataFrame:
+def parse_envlog_csv(df: pd.DataFrame, default_lat: float, default_lon: float) -> pd.DataFrame:
     metadata = extract_metadata(df, default_lat, default_lon)
 
-    clean_df = df.iloc[21:, :].copy()
+    # Find where data starts
+    start_row = 20
+    for i in range(15, 30):
+        if "time" in str(df.iloc[i, 0]).lower():
+            start_row = i + 1
+            break
+
+    clean_df = df.iloc[start_row:, :].copy()
     clean_df = clean_df.dropna(how="all").reset_index(drop=True)
     clean_df.columns = ["time", "temperature"]
 
@@ -111,332 +97,146 @@ def parse_envlog_csv(
 
     clean_df["serial"] = metadata.serial
     clean_df["custom_name"] = metadata.custom_name
-    clean_df["sampling_frequency"] = metadata.sampling_frequency
     clean_df["latitude"] = metadata.latitude
     clean_df["longitude"] = metadata.longitude
 
     return clean_df.dropna(subset=["time", "temperature"]).reset_index(drop=True)
 
 
-def add_rolling_mean(df: pd.DataFrame, window_size: int = 5) -> pd.DataFrame:
-    result = df.copy()
-    result["temperature_rolling_mean"] = (
-        result["temperature"].rolling(window=window_size, min_periods=1).mean()
-    )
-    return result
+# ── CORA ──────────────────────────────────────────────────────────────────────
 
-
-# ── CORA API ──────────────────────────────────────────────────────────────────
-
-@st.cache_data(show_spinner="Scaricamento dati CORA…")
-def fetch_cora_data(latitude: float, longitude: float) -> pd.DataFrame | None:
-    url = CORA_URL_TEMPLATE.format(lat=round(latitude, 4), lon=round(longitude, 4))
+@st.cache_data(show_spinner="Downloading CORA data...")
+def fetch_cora_data(lat: float, lon: float) -> pd.DataFrame | None:
+    url = CORA_URL_TEMPLATE.format(lat=round(lat, 4), lon=round(lon, 4))
     try:
-        response = requests.get(url, verify=False, timeout=60)
-        response.raise_for_status()
-        if "<html" in response.text.lower():
-            raise ValueError("CORA ha restituito HTML invece di CSV")
-        
-        df = pd.read_csv(io.StringIO(response.text), skiprows=[1])
+        resp = requests.get(url, verify=False, timeout=60)
+        resp.raise_for_status()
+        if "<html" in resp.text.lower():
+            raise ValueError("HTML returned")
+        df = pd.read_csv(io.StringIO(resp.text), skiprows=[1])
         df["time"] = pd.to_datetime(df["time"], errors="coerce")
         df["TEMP"] = pd.to_numeric(df["TEMP"], errors="coerce")
         return df.dropna(subset=["time", "TEMP"])
-    except Exception as exc:
-        st.warning(f"Impossibile recuperare i dati CORA: {exc}")
+    except Exception as e:
+        st.warning(f"Could not download CORA data: {e}")
         return None
 
 
-# ── Plotting Functions ────────────────────────────────────────────────────────
+# ── Main Plot (exactly as in your notebook) ───────────────────────────────────
 
-def plot_series_and_doy(
-    sdata: pd.DataFrame,
-    cora_df: pd.DataFrame,
-    latitude: float,
-    longitude: float,
-) -> plt.Figure:
-    fig, axes = plt.subplots(2, 2, figsize=(18, 10),
-                             gridspec_kw={"hspace": 0.38, "wspace": 0.28})
-    ax1, ax2 = axes[0, 0], axes[0, 1]
-    ax3, ax4 = axes[1, 0], axes[1, 1]
-
-    label = sdata["custom_name"].iloc[0]
-    yr = sdata["time"].iloc[0].year
-    t_mean = sdata["temperature"].mean()
-    t_med = sdata["temperature"].median()
-    marker = _year_marker(yr)
-    m_month = sdata["time"].iloc[0].month
-    d_doy = sdata["time"].iloc[0].timetuple().tm_yday
-
-    # CORA monthly
-    cora_m = cora_df.copy()
-    cora_m["month"] = cora_m["time"].dt.month
-    cora_monthly = cora_m.groupby("month")["TEMP"].agg(["mean", "std"]).reset_index()
-
-    # Colours for years
-    years = sorted(cora_df["time"].dt.year.unique())
-    colours = cm.tab20(np.linspace(0, 1, len(years)))
-
-    # Time series
-    ax1.plot(sdata["time"], sdata["temperature"], alpha=0.4, linewidth=0.8,
-             color="steelblue", label="Temperatura raw")
-    if "temperature_rolling_mean" in sdata.columns:
-        ax1.plot(sdata["time"], sdata["temperature_rolling_mean"],
-                 linewidth=2, color="tomato", label="Media mobile")
-    ax1.axhline(t_mean, color="crimson", linewidth=1.4, linestyle="--",
-                label=f"Media {t_mean:.2f} °C")
-    ax1.axhline(t_med, color="darkorange", linewidth=1.4, linestyle="--",
-                label=f"Mediana {t_med:.2f} °C")
-    ax1.legend(fontsize=9)
-    ax1.set_xlabel("Tempo")
-    ax1.set_ylabel("Temperatura (°C)")
-    ax1.set_title(f"Serie temporale — {label} ({yr})")
-    ax1.grid(True, alpha=0.3)
-
-    # Monthly CORA
-    ax2.scatter(cora_monthly["month"], cora_monthly["mean"],
-                color="steelblue", zorder=3, label="CORA media mensile")
-    ax2.errorbar(cora_monthly["month"], cora_monthly["mean"],
-                 yerr=cora_monthly["std"], fmt="o", color="steelblue",
-                 capsize=3, alpha=0.5, label="± std")
-    ax2.plot(m_month, t_mean, marker=marker, markersize=12, linestyle="None",
-             color="crimson", markeredgecolor="black", markeredgewidth=0.8,
-             zorder=5, label=f"{label} media")
-    ax2.plot(m_month, t_med, marker=marker, markersize=12, linestyle="None",
-             color="darkorange", markeredgecolor="black", markeredgewidth=0.8,
-             zorder=5, label=f"{label} mediana")
-    ax2.set_xticks(range(1, 13))
-    ax2.set_xticklabels(MONTH_LABELS, fontsize=9)
-    ax2.set_xlabel("Mese")
-    ax2.set_ylabel("Temperatura [°C]")
-    ax2.set_ylim(top=TMAX)
-    ax2.set_title("CORA Media Mensile ± Std vs Logger")
-    ax2.legend(fontsize=9)
-    ax2.grid(True, alpha=0.3)
-
-    def _draw_cora_doy(ax):
-        for colour, (_, year_data) in zip(colours, cora_df.groupby(cora_df["time"].dt.year)):
-            doy = year_data["time"].dt.dayofyear
-            ax.plot(doy, year_data["TEMP"], marker=".", markersize=4,
-                    linestyle="--", color=colour, alpha=0.6)
-
-    # DOY Mean
-    _draw_cora_doy(ax3)
-    ax3.plot(d_doy, t_mean, marker=marker, markersize=22, linestyle="None",
-             color="crimson", markeredgecolor="black", markeredgewidth=0.8, zorder=5)
-    ax3.set_xlabel("Giorno dell'Anno")
-    ax3.set_ylabel("Temperatura [°C]")
-    ax3.set_title(f"DOY — Marker Media | ({latitude:.2f}, {longitude:.2f})")
-    ax3.grid(True, alpha=0.3)
-
-    # DOY Median
-    _draw_cora_doy(ax4)
-    ax4.plot(d_doy, t_med, marker=marker, markersize=22, linestyle="None",
-             color="darkorange", markeredgecolor="black", markeredgewidth=0.8, zorder=5)
-    ax4.set_xlabel("Giorno dell'Anno")
-    ax4.set_ylabel("Temperatura [°C]")
-    ax4.set_title(f"DOY — Marker Mediana | ({latitude:.2f}, {longitude:.2f})")
-    ax4.grid(True, alpha=0.3)
-
-    fig.suptitle(f"{label} ({yr})", fontsize=14, fontweight="bold", y=1.02)
-    fig.tight_layout()
-    return fig
-
-
-def plot_doy_all(
-    cora_df: pd.DataFrame,
-    logger_dfs: dict[str, pd.DataFrame],
-    latitude: float,
-    longitude: float,
-) -> plt.Figure:
-    fig, ax = plt.subplots(figsize=(12, 6))
-    years = sorted(cora_df["time"].dt.year.unique())
-    colours = cm.tab20(np.linspace(0, 1, len(years)))
-
-    for colour, (_, year_data) in zip(colours, cora_df.groupby(cora_df["time"].dt.year)):
-        doy = year_data["time"].dt.dayofyear
-        ax.plot(doy, year_data["TEMP"], marker=".", markersize=4,
-                linestyle="--", color=colour, alpha=0.5)
-
-    star_colours = cm.Set1(np.linspace(0, 1, max(len(logger_dfs), 1)))
-    for (fname, sdata), sc in zip(logger_dfs.items(), star_colours):
-        d = sdata["time"].iloc[0].timetuple().tm_yday
-        t_mean = sdata["temperature"].mean()
-        t_med = sdata["temperature"].median()
-        label = sdata["custom_name"].iloc[0]
-        yr = sdata["time"].iloc[0].year
-        marker = _year_marker(yr)
-
-        ax.plot(d, t_mean, marker=marker, markersize=12, linestyle="None",
-                color=sc, markeredgecolor="black", markeredgewidth=0.8)
-        ax.plot(d, t_med, marker=marker, markersize=12, linestyle="None",
-                color="white", markeredgecolor=sc, markeredgewidth=2)
-        ax.plot([d, d], [t_mean, t_med], color="grey", linewidth=1, linestyle=":")
-
-    ax.set_xlabel("Giorno dell'Anno")
-    ax.set_ylabel("Temperatura [°C]")
-    ax.set_ylim(top=TMAX)
-    ax.set_title(f"Variabilità Interannuale — Tutti i logger\n({latitude:.2f}, {longitude:.2f})")
-    ax.grid(True, alpha=0.3)
-    fig.tight_layout()
-    return fig
-
-
-def plot_monthly_all(
-    cora_df: pd.DataFrame,
-    logger_dfs: dict[str, pd.DataFrame],
-    latitude: float,
-    longitude: float,
-) -> plt.Figure:
+def plot_interannual_variability(cora_df: pd.DataFrame, logger_dfs: dict, lat: float, lon: float):
     fig, ax = plt.subplots(figsize=(12, 6))
 
-    cora_m = cora_df.copy()
-    cora_m["month"] = cora_m["time"].dt.month
-    cora_monthly = cora_m.groupby("month")["TEMP"].agg(["mean", "std"]).reset_index()
+    cora_plotted = False
+    logger_plotted = False
 
-    ax.scatter(cora_monthly["month"], cora_monthly["mean"],
-               label="CORA media mensile", color="steelblue")
-    ax.errorbar(cora_monthly["month"], cora_monthly["mean"],
-                yerr=cora_monthly["std"], fmt="o", color="steelblue",
-                capsize=3, alpha=0.6, label="± std")
+    # CORA
+    if cora_df is not None and not cora_df.empty:
+        cora_data = cora_df.copy()
+        cora_data['day_of_year'] = cora_data['time'].dt.dayofyear
+        daily_cora = cora_data.groupby('day_of_year')['TEMP'].agg(['mean', 'std']).reset_index()
 
-    star_colours = cm.Set1(np.linspace(0, 1, max(len(logger_dfs), 1)))
-    for (fname, sdata), sc in zip(logger_dfs.items(), star_colours):
-        month = sdata["time"].iloc[0].month
-        t_mean = sdata["temperature"].mean()
-        t_med = sdata["temperature"].median()
-        label = sdata["custom_name"].iloc[0]
-        yr = sdata["time"].iloc[0].year
-        marker = _year_marker(yr)
+        ax.plot(daily_cora['day_of_year'], daily_cora['mean'],
+                color='blue', linewidth=2, label='CORA Interannual Mean')
+        ax.fill_between(daily_cora['day_of_year'],
+                        daily_cora['mean'] - daily_cora['std'].fillna(0),
+                        daily_cora['mean'] + daily_cora['std'].fillna(0),
+                        color='lightblue', alpha=0.4, label='CORA ± Std')
+        cora_plotted = True
 
-        ax.plot(month, t_mean, marker=marker, markersize=12, linestyle="None",
-                color=sc, markeredgecolor="black", markeredgewidth=0.8)
-        ax.plot(month, t_med, marker=marker, markersize=12, linestyle="None",
-                color="white", markeredgecolor=sc, markeredgewidth=2)
-        ax.plot([month, month], [t_mean, t_med], color="grey", linewidth=1, linestyle=":")
+    # Loggers combined
+    if logger_dfs:
+        all_logger_df = pd.concat(logger_dfs.values())
+        if not all_logger_df.empty:
+            all_logger_df['day_of_year'] = all_logger_df['time'].dt.dayofyear
+            daily_logger = all_logger_df.groupby('day_of_year')['temperature'].agg(['mean', 'max', 'min']).reset_index()
 
-    ax.set_xticks(range(1, 13))
-    ax.set_xticklabels(MONTH_LABELS, fontsize=9)
-    ax.set_xlabel("Mese")
-    ax.set_ylabel("Temperatura [°C]")
-    ax.set_ylim(top=TMAX)
-    ax.set_title("Confronto Mensile — Tutti i logger vs CORA")
-    ax.legend(fontsize=9)
-    ax.grid(True, alpha=0.3)
+            ax.plot(daily_logger['day_of_year'], daily_logger['mean'],
+                    color='red', label='Loggers Mean', linestyle='-', marker='o', markersize=3)
+            ax.plot(daily_logger['day_of_year'], daily_logger['max'],
+                    color='darkorange', label='Loggers Max', linestyle=':', marker='^', markersize=3)
+            ax.plot(daily_logger['day_of_year'], daily_logger['min'],
+                    color='green', label='Loggers Min', linestyle='--', marker='v', markersize=3)
+            logger_plotted = True
+
+    ax.set_xlabel('Day of Year')
+    ax.set_ylabel('Temperature [°C]')
+    ax.set_title(f'Interannual Temperature Variability at ({lat:.2f}, {lon:.2f})')
+    ax.grid(True)
+
+    if cora_plotted or logger_plotted:
+        ax.legend()
+    else:
+        ax.text(0.5, 0.5, "No data available", ha='center', va='center', transform=ax.transAxes)
+
     fig.tight_layout()
     return fig
 
 
-# ── Main App ──────────────────────────────────────────────────────────────────
+# ── Streamlit App ─────────────────────────────────────────────────────────────
 
 apply_cs_mach1_theme(
     page_title="CS-MACH EnvLogger Pipeline",
     page_icon="logo.png",
-    main_title="🌊 CS-MACH: Cosa dice il mio envlogger sulla temperatura dell'acqua? 🌡",
-    subtitle="Piattaforma di confronto temperatura oceanica (logger in-situ vs rianalisi CORA)",
+    main_title="🌊 CS-MACH: What does my EnvLogger say about seawater temperature? 🌡",
+    subtitle="In-situ data vs CORA reanalysis",
     logo_path="logo.png",
     logo_width=220,
 )
 
-# Sidebar
 with st.sidebar:
-    st.markdown("### ⚙️ Impostazioni")
-    window_size = st.slider("Finestra media mobile", 1, 20, 5)
+    st.markdown("### Settings")
+    default_lat = st.number_input("Default Latitude", value=44.376, format="%.4f")
+    default_lon = st.number_input("Default Longitude", value=9.071, format="%.4f")
 
-    st.divider()
-    st.markdown("#### 📍 Coordinate di default")
-    default_lat = st.number_input("Latitudine default", value=44.376290, format="%.6f")
-    default_lon = st.number_input("Longitudine default", value=9.071358, format="%.6f")
-
-    st.divider()
-    if st.button("🧹 Reset", use_container_width=True):
-        st.session_state.clear()
-        st.rerun()
-
-# File uploader
 uploaded_files = st.file_uploader(
-    "Carica uno o più file CSV envlog",
+    "Upload one or more EnvLogger CSV files",
     type=["csv"],
     accept_multiple_files=True
 )
 
-if uploaded_files:
-    st.session_state["uploaded_files"] = uploaded_files
+if st.button("🚀 Process Files", type="primary", use_container_width=True) and uploaded_files:
+    logger_dfs = {}
+    progress = st.progress(0)
 
-# Processing
-if st.button("▶️ Avvia Elaborazione", type="primary", use_container_width=True) and "uploaded_files" in st.session_state:
-    raw_files = st.session_state["uploaded_files"]
-    logger_dfs: dict[str, pd.DataFrame] = {}
-
-    pbar = st.progress(0)
-
-    for i, file in enumerate(raw_files):
-        pbar.progress((i + 1) / len(raw_files), text=f"Elaborazione: {file.name}")
+    for i, file in enumerate(uploaded_files):
+        progress.progress((i + 1) / len(uploaded_files), text=f"Processing {file.name}")
         try:
             raw_df = pd.read_csv(file, header=None)
             clean_df = parse_envlog_csv(raw_df, default_lat, default_lon)
-            proc_df = add_rolling_mean(clean_df, window_size)
-            logger_dfs[file.name] = proc_df
+            logger_dfs[file.name] = clean_df
         except Exception as e:
-            st.error(f"Errore su {file.name}: {e}")
-
-    pbar.progress(1.0, text="✅ Elaborazione completata!")
+            st.error(f"Error processing {file.name}: {e}")
 
     if logger_dfs:
-        st.session_state["logger_dfs"] = logger_dfs
-        st.success(f"{len(logger_dfs)} file elaborati con successo!")
+        st.session_state.logger_dfs = logger_dfs
+        st.success(f"✅ {len(logger_dfs)} file(s) processed!")
 
-# Display results
-if "logger_dfs" in st.session_state:
-    logger_dfs = st.session_state["logger_dfs"]
+# Display
+if "logger_dfs" in st.session_state and st.session_state.logger_dfs:
+    logger_dfs = st.session_state.logger_dfs
     first_df = next(iter(logger_dfs.values()))
-    latitude = float(first_df["latitude"].iloc[0])
-    longitude = float(first_df["longitude"].iloc[0])
+    lat = float(first_df["latitude"].iloc[0])
+    lon = float(first_df["longitude"].iloc[0])
 
-    with st.spinner("Caricamento dati CORA..."):
-        cora_df = fetch_cora_data(latitude, longitude)
+    cora_df = fetch_cora_data(lat, lon)
 
-    if cora_df is None or cora_df.empty:
-        st.error("Impossibile scaricare i dati CORA.")
-        st.stop()
+    st.header("📊 Interannual Variability (All Loggers vs CORA)")
+    fig = plot_interannual_variability(cora_df, logger_dfs, lat, lon)
+    st.pyplot(fig)
+    plt.close(fig)
 
-    # Per singolo file
-    for fname, sdata in logger_dfs.items():
-        st.subheader(f"📄 {fname}")
-        col1, col2, col3, col4 = st.columns(4)
-        col1.metric("Media", f"{sdata['temperature'].mean():.2f} °C")
-        col2.metric("Mediana", f"{sdata['temperature'].median():.2f} °C")
-        col3.metric("Std", f"{sdata['temperature'].std():.2f} °C")
-        col4.metric("Coordinate", f"{latitude:.4f}, {longitude:.4f}")
-
-        fig = plot_series_and_doy(sdata, cora_df, latitude, longitude)
-        st.pyplot(fig)
-        plt.close(fig)
-        st.divider()
-
-    # Riepilogo globale
-    st.header("📊 Riepilogo — Tutti i Logger")
+    # Summary table
     summary = []
-    for fname, sdata in logger_dfs.items():
+    for fname, df in logger_dfs.items():
         summary.append({
             "File": fname,
-            "Logger": sdata["custom_name"].iloc[0],
-            "Media (°C)": round(sdata["temperature"].mean(), 2),
-            "Mediana (°C)": round(sdata["temperature"].median(), 2),
-            "Std (°C)": round(sdata["temperature"].std(), 2),
-            "Campioni": len(sdata),
+            "Logger Name": df["custom_name"].iloc[0],
+            "Mean (°C)": round(df["temperature"].mean(), 2),
+            "Max (°C)": round(df["temperature"].max(), 2),
+            "Min (°C)": round(df["temperature"].min(), 2),
+            "Samples": len(df),
         })
     st.dataframe(pd.DataFrame(summary), use_container_width=True)
 
-    fig_doy = plot_doy_all(cora_df, logger_dfs, latitude, longitude)
-    st.pyplot(fig_doy)
-    plt.close(fig_doy)
-
-    fig_month = plot_monthly_all(cora_df, logger_dfs, latitude, longitude)
-    st.pyplot(fig_month)
-    plt.close(fig_month)
-
-    st.info("**Marker pieno** = media | **Marker aperto** = mediana")
-
-    cs_mach1_footer(
-        text="CS-MACH · EnvLogger Analysis Pipeline"
-    )
+    cs_mach1_footer("CS-MACH · EnvLogger Analysis Pipeline")
