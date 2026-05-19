@@ -25,6 +25,7 @@ apply_cs_mach1_theme(
     page_title="CS-MACH1 fixed envlogger pipeline",
     main_title="CS-MACH1: What does a fixed envlogger say about Sea Water Temperature?",
     subtitle="Ocean temperature comparison platform (in-situ loggers vs CORA reanalysis)",
+    page_icon="logo.png",
 )
 
 # ── Constants ─────────────────────────────────────────────────────────────────
@@ -180,14 +181,6 @@ def plot_interannual_variability(cora_df: pd.DataFrame, logger_dfs: dict, lat: f
 
 # ── Streamlit App ─────────────────────────────────────────────────────────────
 
-apply_cs_mach1_theme(
-    page_title="CS-MACH EnvLogger Pipeline",
-    page_icon="logo.png",
-    main_title="🌊 CS-MACH: What does my EnvLogger say about seawater temperature? 🌡",
-    subtitle="In-situ data vs CORA reanalysis",
-    logo_path="logo.png",
-    logo_width=220,
-)
 
 with st.sidebar:
     st.markdown("### Settings")
